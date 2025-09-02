@@ -16,7 +16,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 @register(
     "astrbot_plugin_human_service_pro",
     "MegSopern",
-    "人工客服插件",
+    "人工客服插件增强版",
     "1.1.0",
     "https://github.com/MegSopern/astrbot_plugin_human_service_pro",
 )
@@ -26,17 +26,14 @@ class HumanServicePlugin(Star):
 
         # 从配置中读取参数
         self.servicers_id: list[str] = config.get("servicers_id", [])
-        session_timeout = config.get("session_timeout", 60)
-        # isinstance是Python内置的一个类型检查函数，用来判断一个对象是否属于某个（或某几个）类型
-        if not isinstance(session_timeout, int) or session_timeout <= 0:
-            logger.info(f"无效的timeout值'{session_timeout}'in config,使用默认值60s")
-            session_timeout = 60
-        self.session_timeout: int = session_timeout  # 超时时间(秒)
+        # 用户等待人工接入的超时时间(秒)
+        self.waiting_timeout = config.get("waiting_timeout", 300)
+        # 人工对话最大持续时间(秒)
+        self.conversation_timeout = config.get("conversation_timeout", 600)
 
         # 初始化会话管理器
-        self.session_map: Dict[
-            str, Dict
-        ] = {}  # {user_id: {servicer_id, status, group_id, start_time}}
+        self.session_map: Dict[str, Dict] = {}
+        # {user_id: {servicer_id, status, group_id, start_time, user_umo}}
         # 如果未配置客服，使用管理员作为默认客服
         if not self.servicers_id:
             for admin_id in context.get_config()["admins_id"]:
@@ -68,7 +65,13 @@ class HumanServicePlugin(Star):
         for user_id, session in self.session_map.items():
             # 计算会话持续时间(秒)
             duration = current_time - session["start_time"]
-            if duration >= self.session_timeout:
+            # 根据状态使用不同的超时阈值
+            if (
+                session["status"] == "waiting" and duration >= self.waiting_timeout
+            ) or (
+                session["status"] == "connected"
+                and duration >= self.conversation_timeout
+            ):
                 timeout_sessions.append(user_id)
 
         # 处理超时会话
@@ -80,17 +83,15 @@ class HumanServicePlugin(Star):
 
             # 通知双方会话超时
             if session["status"] == "connected":
-                self._send_timeout_notification(user_id, session)
+                await self._send_timeout_notification(user_id, session)
             elif session["status"] == "waiting":
                 try:
-                    await self.send(
-                        None,
-                        message="抱歉，当前排队超时，请重新发起人工服务请求",
-                        user_id=user_id,
-                        group_id=session["group_id"],
+                    message_chain = MessageChain().message(
+                        f"【{user_id}】用户，很抱歉：\n您转人工排队超时，请重新请求"
                     )
+                    await self.context.send_message(session["user_umo"], message_chain)
                 except Exception as e:
-                    logger.error(f"通知用户 {user_id} 排队超时失败: {str(e)}")
+                    logger.error(f"通知用户 {user_id} 排队超时的消息发送失败: {str(e)}")
 
             del self.session_map[user_id]
 
@@ -98,18 +99,15 @@ class HumanServicePlugin(Star):
         """发送会话超时通知"""
         try:
             # 通知用户
-            await self.send(
-                None,
-                message="会话已超时结束",
-                user_id=user_id,
-                group_id=session["group_id"],
-            )
+            user_chain = MessageChain().message("会话已超时结束")
+            await self.context.send_message(session["user_umo"], user_chain)
 
             # 通知客服
-            await self.send(
-                None,
-                message=f"与用户 {user_id} 的会话已超时结束",
-                user_id=session["servicer_id"],
+            servicer_chain = MessageChain().message(
+                f"您与用户 {user_id} 的会话已超时结束"
+            )
+            await self.context.send_message(
+                f"private:{session['servicer_id']}", servicer_chain
             )
         except Exception as e:
             logger.error(f"发送超时通知失败: {str(e)}")
@@ -121,6 +119,9 @@ class HumanServicePlugin(Star):
         send_name = event.get_sender_name()
         group_id = event.get_group_id() or "0"
 
+        # 存储用户的unified_msg_origin
+        user_umo = event.unified_msg_origin
+
         if sender_id in self.session_map:
             status = self.session_map[sender_id]["status"]
             if status == "waiting":
@@ -130,25 +131,26 @@ class HumanServicePlugin(Star):
                 yield event.plain_result("⚠ 您已在对话中")
             return
 
-        # 无论是否有客服，都加入等待队列
+        # 无论是否有客服，都加入等待队列，同时存储umo
         self.session_map[sender_id] = {
             "servicer_id": "",
-            "status": "waiting",  # waiting/connected
+            "status": "waiting",
             "group_id": group_id,
             "start_time": time.time(),
+            "user_umo": user_umo,  # 新增存储用户的umo
         }
         # 获取当前排队位置
         position = self._get_user_position(sender_id)
         waiting_count = self._get_waiting_count()
-        session_timeout = self.session_timeout / 60
+        waiting_timeout = round(self.waiting_timeout / 60, 2)
         yield event.plain_result(
-            f"已加入人工服务排队队列👥\n当前排队人数: {waiting_count} 人\n您的排名: {position}\n请耐心等待超级管理员接入，超时{session_timeout}分钟将自动取消\n(注意：恶意转人工将会被拉黑)"
+            f"已加入人工服务排队队列👥\n当前排队人数: {waiting_count} 人\n您的排名: {position}\n请耐心等待超级管理员接入，超时{waiting_timeout}分钟未接入将自动取消请求\n(注意：恶意转人工将会被拉黑)"
         )
         for servicer_id in self.servicers_id:
             try:
                 await self.send(
                     event,
-                    message=f"{send_name}({sender_id})请求转人工\n当前等待队列长度: {waiting_count}",
+                    message=f"{send_name}【{sender_id}】\n请求转人工服务\n当前等待队列长度: {waiting_count}",
                     user_id=servicer_id,
                 )
             except Exception as e:
@@ -170,7 +172,7 @@ class HumanServicePlugin(Star):
             try:
                 await self.send(
                     event,
-                    message=f"❗{sender_name} 已结束人工对话",
+                    message=f"{sender_name} 已主动结束人工对话",
                     user_id=session["servicer_id"],
                 )
             except Exception as e:
@@ -195,13 +197,12 @@ class HumanServicePlugin(Star):
         ]
         for idx, user_id in enumerate(waiting_users):
             new_position = idx + 1
+            user_session = self.session_map[user_id]
             try:
-                await self.send(
-                    None,
-                    message=f"排队位置更新: {user_id}:您当前排名 {new_position}\n(前方还有 {new_position - 1} 人)",
-                    user_id=user_id,
-                    group_id=self.session_map[user_id]["group_id"],
+                message_chain = MessageChain().message(
+                    f"排队位置更新: 您当前排名 {new_position}\n(前方还有 {new_position - 1} 人)"
                 )
+                await self.context.send_message(user_session["user_umo"], message_chain)
             except Exception as e:
                 logger.error(f"通知用户 {user_id} 位置变化失败: {str(e)}")
 
@@ -223,7 +224,7 @@ class HumanServicePlugin(Star):
             (seg for seg in event.get_messages() if isinstance(seg, Reply)), None
         ):
             if text := reply_seg.message_str:
-                if match := re.search(r"\((\d+)\)", text):
+                if match := re.search(r"[(\[【](\d+)[)\]】]", text):
                     target_id = match.group(1)
 
         target_id = str(target_id)
@@ -237,17 +238,20 @@ class HumanServicePlugin(Star):
         if session["status"] == "connected":
             yield event.plain_result("您正在与该用户对话")
 
-        # 更新会话状态
+        # 更新会话状态时保留用户umo
         session["status"] = "connected"
         session["servicer_id"] = sender_id
         session["start_time"] = time.time()  # 重置计时
+        # 保留用户的umo信息
+        session["user_umo"] = session.get("user_umo", "")
 
         # 通知用户
         try:
+            conversation_timeout = round(self.conversation_timeout / 60, 2)
             await self.send(
                 event,
                 message=(
-                    f"超级管理员👤:{sender_name}\n已接入对话⚠️⚠️⚠️\n(请用简洁的话描述所遇到的问题)"
+                    f"超级管理员👤:{sender_name}\n已接入对话⚠️⚠️⚠️\n您最多有{conversation_timeout}分钟的时间进行对话\n(请用简洁的话描述所遇到的问题)"
                 ),
                 group_id=session["group_id"],
                 user_id=target_id,
@@ -262,7 +266,7 @@ class HumanServicePlugin(Star):
         await self._notify_position_change()
 
         yield event.plain_result(
-            f"好的，已成功接入用户 {target_id} 的对话，请开始对话："
+            f"好的，您现在已成功接入\n与用户 {target_id} 的对话\n请开始对话："
         )
         event.stop_event()
 
@@ -270,7 +274,7 @@ class HumanServicePlugin(Star):
     async def end_conversation(self, event: AiocqhttpMessageEvent):
         """客服结束当前人工对话"""
         sender_id = event.get_sender_id()
-        send_name = event.get_sender_name()
+        sender_name = event.get_sender_name()
         if sender_id not in self.servicers_id:
             return
 
@@ -278,7 +282,7 @@ class HumanServicePlugin(Star):
             if session["servicer_id"] == sender_id:
                 await self.send(
                     event,
-                    message="超级管理员👤已结束对话",
+                    message=(f"超级管理员👤：{sender_name}\n❗已结束与你的对话❗"),
                     group_id=session["group_id"],
                     user_id=uid,
                 )
@@ -396,37 +400,8 @@ class HumanServicePlugin(Star):
                 )
                 event.stop_event()
 
-    # async def terminate(self):
-    #     """插件卸载时调用，清理会话"""
-    #     logger.info("人工客服插件正在卸载，清理会话中...")
-    #     # 通知所有活跃会话的用户和客服
-    #     for user_id, session in self.session_map.items():
-    #         try:
-    #             if session["status"] == "connected":
-    #                 # 通知用户
-    #                 await self.send(
-    #                     None,
-    #                     message="系统维护，会话已结束",
-    #                     user_id=user_id,
-    #                     group_id=session["group_id"],
-    #                 )
-
-    #                 # 通知客服
-    #                 await self.send(
-    #                     None,
-    #                     message=f"系统维护，与用户 {user_id} 的会话已结束",
-    #                     user_id=session["servicer_id"],
-    #                 )
-    #             elif session["status"] == "waiting":
-    #                 # 通知排队用户
-    #                 await self.send(
-    #                     None,
-    #                     message="系统维护，排队已取消",
-    #                     user_id=user_id,
-    #                     group_id=session["group_id"],
-    #                 )
-    #         except Exception as e:
-    #             logger.error(f"清理会话时发送通知失败: {str(e)}")
-
-    #     self.session_map.clear()
-    #     logger.info("人工客服插件卸载完成")
+    async def terminate(self):
+        """插件卸载时调用，清理会话"""
+        logger.info("人工客服插件正在卸载，清理会话中...")
+        self.session_map.clear()
+        logger.info("人工客服插件卸载完成")
