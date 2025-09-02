@@ -1,6 +1,6 @@
 name: astrbot_plugin_human_service_pro # 这是你的插件的唯一识别名。
-desc: 人工客服插件 # 插件简短描述
+desc: 人工客服插件增强版 # 插件简短描述
 help:  用户转人工客服，管理员接入，支持暂停、恢复、取消、结束 # 插件的帮助信息
-version: v1.0.5 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v1.1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: MegSopern # 作者
 repo: https://github.com/MegSopern/astrbot_plugin_human_service_pro # 插件的仓库地址

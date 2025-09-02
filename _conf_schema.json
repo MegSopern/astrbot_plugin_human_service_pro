@@ -2,6 +2,19 @@
     "servicers_id": {
         "description": "客服QQ",
         "type": "list",
-        "hint": "若不填则默认从全局配置中加载管理员作为客服"
+        "hint": "若不填则默认从全局配置中加载管理员作为客服",
+        "default": []
+    },
+    "waiting_timeout": {
+        "description": "用户等待人工接入的超时时间(秒)",
+        "type": "int",
+        "hint": "超过该时间未转人工，则自动结束请求，默认300s",
+        "default": 300
+    },
+    "conversation_timeout": {
+        "description": "人工对话最大持续时间(秒)",
+        "type": "int",
+        "hint": "对话持续时间超过该时间，则自动结束对话，默认600s",
+        "default": 600
     }
 }

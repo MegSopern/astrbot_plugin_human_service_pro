@@ -1,9 +1,9 @@
 
 <div align="center">
 
-![:name](https://count.getloli.com/@astrbot_plugin_human_service?name=astrbot_plugin_human_service&theme=minecraft&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
+![:name](https://count.getloli.com/@astrbot_plugin_human_service_pro?name=astrbot_plugin_human_service_pro&theme=minecraft&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
 
-# astrbot_plugin_human_service
+# astrbot_plugin_human_service_pro
 
 _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 人工客服插件 ✨_  
 
@@ -16,20 +16,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 人工客服插件 ✨_
 
 ## 🤝 介绍
 
-让bot转人工\转人机，管理员接入对话\结束对话
-
-## 📦 安装
-
-- 可以直接在astrbot的插件市场搜索astrbot_plugin_human_service，点击安装，耐心等待安装完成即可
-- 若是安装失败，可以尝试直接克隆源码：
-
-```bash
-# 克隆仓库到插件目录
-cd /AstrBot/data/plugins
-git clone https://github.com/MegSopern/astrbot_plugin_human_service_pro
-
-# 控制台重启AstrBot
-```
+人工客服插件增强版
 
 ## ⌨️ 使用说明
 
@@ -55,4 +42,4 @@ git clone https://github.com/MegSopern/astrbot_plugin_human_service_pro
 
 ## 📌 注意事项
 
-- 想第一时间得到反馈的可以来作者的插件反馈群（QQ群）：460973561（不点star不给进）
+- 想第一时间得到反馈的可以来作者的插件反馈群（QQ群）：813477109（不点star不给进）
