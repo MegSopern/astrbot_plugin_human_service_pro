@@ -23,9 +23,15 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 class HumanServicePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+
         # 从配置中读取参数
         self.servicers_id: list[str] = config.get("servicers_id", [])
-        self.session_timeout = config.get("session_timeout", 60)  # 超时时间(秒)
+        session_timeout = config.get("session_timeout", 60)
+        # isinstance是Python内置的一个类型检查函数，用来判断一个对象是否属于某个（或某几个）类型
+        if not isinstance(session_timeout, int) or session_timeout <= 0:
+            logger.info(f"无效的timeout值'{session_timeout}'in config,使用默认值60s")
+            session_timeout = 60
+        self.session_timeout: int = session_timeout  # 超时时间(秒)
 
         # 初始化会话管理器
         self.session_map: Dict[
@@ -174,7 +180,7 @@ class HumanServicePlugin(Star):
         del self.session_map[sender_id]
 
         # 通知其他排队用户位置变化
-        self._notify_position_change()
+        await self._notify_position_change()
         if session["status"] == "waiting":
             yield event.plain_result("已取消人工服务排队请求")
         else:
@@ -289,7 +295,7 @@ class HumanServicePlugin(Star):
     async def list_active_sessions(self, event: AiocqhttpMessageEvent):
         """查看当前所有活跃的客服对话和排队队列"""
         # 先清理超时会话
-        self._check_session_timeout()
+        await self._check_session_timeout()
         if not self.session_map:
             yield event.plain_result("当前没有活跃会话和排队请求")
             return
@@ -353,14 +359,13 @@ class HumanServicePlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_match(self, event: AiocqhttpMessageEvent):
         """监听对话消息转发"""
-        self._check_session_timeout()
+        await self._check_session_timeout()
         chain = event.get_messages()
-        sender_id = str(event.get_sender_id())
+        sender_id: str = event.get_sender_id()
 
         # 忽略空消息和包含回复的消息（避免循环转发）
         if not chain or any(isinstance(seg, (Reply)) for seg in chain):
             return
-        sender_id = event.get_sender_id()
 
         # 管理员 → 用户 (仅私聊生效)
         if (
