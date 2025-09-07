@@ -17,7 +17,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     "astrbot_plugin_human_service_pro",
     "MegSopern",
     "人工客服插件增强版",
-    "1.1.0",
+    "1.1.1",
     "https://github.com/MegSopern/astrbot_plugin_human_service_pro",
 )
 class HumanServicePlugin(Star):
