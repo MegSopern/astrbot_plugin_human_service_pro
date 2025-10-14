@@ -29,7 +29,7 @@ class HumanServicePlugin(Star):
         # 用户等待人工接入的超时时间(秒)
         self.waiting_timeout = config.get("waiting_timeout", 300)
         # 人工对话最大持续时间(秒)
-        self.conversation_timeout = config.get("conversation_timeout", 600)
+        self.conversation_timeout = config.get("conversation_timeout", 300)
 
         # 初始化会话管理器
         self.session_map: Dict[str, Dict] = {}
@@ -77,9 +77,6 @@ class HumanServicePlugin(Star):
         # 处理超时会话
         for user_id in timeout_sessions:
             session = self.session_map[user_id]
-            logger.info(
-                f"会话超时: 用户 {user_id} 与客服 {session['servicer_id'] or '未分配'}"
-            )
 
             # 通知双方会话超时
             if session["status"] == "connected":
@@ -101,7 +98,6 @@ class HumanServicePlugin(Star):
             # 通知用户
             user_chain = MessageChain().message("会话已超时结束")
             await self.context.send_message(session["user_umo"], user_chain)
-
             # 通知客服
             servicer_chain = MessageChain().message(
                 f"您与用户 {user_id} 的会话已超时结束"
@@ -156,7 +152,7 @@ class HumanServicePlugin(Star):
             except Exception as e:
                 logger.error(f"通知客服 {servicer_id} 新排队用户失败: {str(e)}")
 
-    @filter.command("转人机", priority=1)
+    @filter.command("转人机", alias={"取消人工服务", "取消转人工"}, priority=1)
     async def transfer_to_bot(self, event: AiocqhttpMessageEvent):
         """用户取消人工服务，退出排队或结束对话"""
         sender_id = event.get_sender_id()
@@ -294,10 +290,14 @@ class HumanServicePlugin(Star):
         return
 
     # 管理员指令：查看当前所有对话
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("查看对话", alias={"查看会话", "查看排队"})
     async def list_active_sessions(self, event: AiocqhttpMessageEvent):
         """查看当前所有活跃的客服对话和排队队列"""
+        # 验证客服权限
+        sender_id = event.get_sender_id()
+        if sender_id not in self.servicers_id:
+            yield event.plain_result("❌ 您没有权限查看对话")
+            return
         # 先清理超时会话
         await self._check_session_timeout()
         if not self.session_map:
@@ -321,14 +321,14 @@ class HumanServicePlugin(Star):
             msg_lines.append("📋 排队队列：")
             for idx, (uid, session) in enumerate(waiting_sessions):
                 duration = int(time.time() - session["start_time"]) // 60
-                msg_lines.append(f"{idx + 1}. 用户 {uid}（等待时间：{duration}分钟）")
+                msg_lines.append(f"{idx + 1}. 用户 {uid}\n（等待时间：{duration}分钟）")
 
         if active_sessions:
             msg_lines.append("\n🔗 活跃对话：")
             for uid, session in active_sessions:
                 duration = int(time.time() - session["start_time"]) // 60
                 msg_lines.append(
-                    f"- 用户 {uid}（客服：{session['servicer_id']}，时长：{duration}分钟）"
+                    f"- 用户 {uid}\n（客服：{session['servicer_id']}，时长：{duration}分钟）"
                 )
         yield event.plain_result("\n".join(msg_lines))
 
