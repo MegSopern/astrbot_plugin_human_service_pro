@@ -5,7 +5,7 @@ from typing import Dict, Iterable, List, Optional
 
 from astrbot import logger
 from astrbot.api.event import filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.message.components import Reply
 from astrbot.core.message.message_event_result import MessageChain
@@ -16,7 +16,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 
 @dataclass
 class Session:
-    """会话数据模型：记录用户与客服的会话状态。"""
+    """会话数据模型：记录用户与客服的会话状态"""
 
     user_id: str
     servicer_id: str
@@ -27,7 +27,7 @@ class Session:
 
 
 class SessionManager:
-    """会话管理器：集中处理会话增删查改与排队/超时逻辑。"""
+    """会话管理器：集中处理会话增删查改与排队/超时逻辑"""
 
     def __init__(self, waiting_timeout: int, conversation_timeout: int):
         self.waiting_timeout = waiting_timeout
@@ -35,19 +35,32 @@ class SessionManager:
         self._sessions: Dict[str, Session] = {}
 
     def has_session(self, user_id: str) -> bool:
-        """判断用户是否已存在会话。"""
+        """判断用户是否已存在会话"""
         return user_id in self._sessions
 
     def is_empty(self) -> bool:
-        """是否无任何会话。"""
+        """
+        是否无任何会话\n
+        :return: True表示无会话，False表示有会话
+        """
         return not self._sessions
 
     def get(self, user_id: str) -> Optional[Session]:
-        """获取用户会话，不存在返回 None。"""
+        """
+        获取指定用户会话\n
+        :param user_id: 用户ID
+        :return: 会话对象或None
+        """
         return self._sessions.get(user_id)
 
     def add_waiting(self, user_id: str, group_id: str, user_umo: str) -> Session:
-        """新增排队会话。"""
+        """
+        新增排队会话\n
+        :param user_id: 用户ID
+        :param group_id: 群组ID
+        :param user_umo: 用户UMO
+        :return: 新增的会话对象
+        """
         session = Session(
             user_id=user_id,
             servicer_id="",
@@ -60,31 +73,54 @@ class SessionManager:
         return session
 
     def remove(self, user_id: str) -> None:
-        """删除指定用户会话。"""
+        """
+        删除指定用户会话\n
+        :param user_id: 用户ID
+        :return: None
+        """
         if user_id in self._sessions:
             del self._sessions[user_id]
 
     def list_waiting(self) -> List[Session]:
-        """获取当前排队会话列表。"""
+        """
+        获取当前排队会话列表\n
+        :param user_id: 用户ID
+        :return: 排队会话列表
+        """
         return [s for s in self._sessions.values() if s.status == "waiting"]
 
     def list_connected(self) -> List[Session]:
-        """获取当前已接入对话的会话列表。"""
+        """
+        获取当前已接入对话的会话列表\n
+        :return: 已接入对话会话列表
+        """
         return [s for s in self._sessions.values() if s.status == "connected"]
 
     def waiting_count(self) -> int:
-        """当前排队人数。"""
+        """
+        当前排队人数\n
+        :return: 排队人数
+        """
         return len(self.list_waiting())
 
     def waiting_position(self, user_id: str) -> Optional[int]:
-        """获取用户在排队中的位置（从1开始）。"""
+        """
+        获取用户在排队中的位置（从1开始）\n
+        :param user_id: 用户ID
+        :return: 排队位置（从1开始），如果不在排队中返回None
+        """
         waiting_users = [s.user_id for s in self.list_waiting()]
         if user_id in waiting_users:
             return waiting_users.index(user_id) + 1
         return None
 
     def connect(self, user_id: str, servicer_id: str) -> Optional[Session]:
-        """将排队会话标记为已接入并重置开始时间。"""
+        """
+        将排队会话标记为已接入并重置开始时间\n
+        :param user_id: 用户ID
+        :param servicer_id: 客服ID
+        :return: 更新后的会话对象或None
+        """
         session = self.get(user_id)
         if not session:
             return None
@@ -94,7 +130,10 @@ class SessionManager:
         return session
 
     def iter_timeout_sessions(self) -> Iterable[Session]:
-        """遍历超时会话（等待或对话超时）。"""
+        """
+        遍历超时会话（等待或对话超时）\n
+        :return: 超时会话生成器
+        """
         current_time = time.time()
         for session in list(self._sessions.values()):
             duration = current_time - session.start_time
@@ -104,13 +143,6 @@ class SessionManager:
                 yield session
 
 
-@register(
-    "astrbot_plugin_human_service_pro",
-    "MegSopern",
-    "人工客服插件增强版",
-    "1.1.0",
-    "https://github.com/MegSopern/astrbot_plugin_human_service_pro",
-)
 class HumanServicePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -133,7 +165,7 @@ class HumanServicePlugin(Star):
                 if admin_id.isdigit():
                     self.servicers_id.append(admin_id)
 
-    async def _check_session_timeout(self):
+    async def _check_session_timeout(self) -> None:
         """检查并清理超时会话"""
         # 处理超时会话
         for session in self.sessions.iter_timeout_sessions():
@@ -153,8 +185,12 @@ class HumanServicePlugin(Star):
 
             self.sessions.remove(user_id)
 
-    async def _send_timeout_notification(self, session: Session):
-        """发送会话超时通知"""
+    async def _send_timeout_notification(self, session: Session) -> None:
+        """
+        发送会话超时通知\n
+        :param session: 会话对象
+        :return: None
+        """
         try:
             # 通知用户
             user_chain = MessageChain().message("会话已超时结束")
@@ -239,7 +275,7 @@ class HumanServicePlugin(Star):
         else:
             yield event.plain_result("好的，已结束人工对话，我现在是bot啦！")
 
-    async def _notify_position_change(self):
+    async def _notify_position_change(self) -> None:
         """通知排队用户位置变化"""
         waiting_sessions = self.sessions.list_waiting()
         for idx, session in enumerate(waiting_sessions):
@@ -390,8 +426,15 @@ class HumanServicePlugin(Star):
         message,
         group_id: int | str | None = None,
         user_id: int | str | None = None,
-    ):
-        """向用户发消息，兼容群聊或私聊"""
+    ) -> None:
+        """
+        向用户发消息，兼容群聊或私聊\n
+        :param event: 事件对象
+        :param message: 消息内容
+        :param group_id: 目标群组ID
+        :param user_id: 目标用户ID
+        :return: None
+        """
         if group_id and str(group_id) != "0":
             await event.bot.send_group_msg(group_id=int(group_id), message=message)
         elif user_id:
@@ -402,8 +445,14 @@ class HumanServicePlugin(Star):
         event: AiocqhttpMessageEvent,
         group_id: int | str | None = None,
         user_id: int | str | None = None,
-    ):
-        """向用户发onebot格式的消息，兼容群聊或私聊"""
+    ) -> None:
+        """
+        向用户发onebot格式的消息，兼容群聊或私聊\n
+        :param event: 事件对象
+        :param group_id: 目标群组ID
+        :param user_id: 目标用户ID
+        :return: None
+        """
         ob_message = await event._parse_onebot_json(
             MessageChain(chain=event.message_obj.message)
         )
