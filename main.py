@@ -1,6 +1,7 @@
 import re
 import time
-from typing import Dict
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional
 
 from astrbot import logger
 from astrbot.api.event import filter
@@ -11,6 +12,96 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+
+
+@dataclass
+class Session:
+    """会话数据模型：记录用户与客服的会话状态。"""
+
+    user_id: str
+    servicer_id: str
+    status: str
+    group_id: str
+    start_time: float
+    user_umo: str
+
+
+class SessionManager:
+    """会话管理器：集中处理会话增删查改与排队/超时逻辑。"""
+
+    def __init__(self, waiting_timeout: int, conversation_timeout: int):
+        self.waiting_timeout = waiting_timeout
+        self.conversation_timeout = conversation_timeout
+        self._sessions: Dict[str, Session] = {}
+
+    def has_session(self, user_id: str) -> bool:
+        """判断用户是否已存在会话。"""
+        return user_id in self._sessions
+
+    def is_empty(self) -> bool:
+        """是否无任何会话。"""
+        return not self._sessions
+
+    def get(self, user_id: str) -> Optional[Session]:
+        """获取用户会话，不存在返回 None。"""
+        return self._sessions.get(user_id)
+
+    def add_waiting(self, user_id: str, group_id: str, user_umo: str) -> Session:
+        """新增排队会话。"""
+        session = Session(
+            user_id=user_id,
+            servicer_id="",
+            status="waiting",
+            group_id=group_id,
+            start_time=time.time(),
+            user_umo=user_umo,
+        )
+        self._sessions[user_id] = session
+        return session
+
+    def remove(self, user_id: str) -> None:
+        """删除指定用户会话。"""
+        if user_id in self._sessions:
+            del self._sessions[user_id]
+
+    def list_waiting(self) -> List[Session]:
+        """获取当前排队会话列表。"""
+        return [s for s in self._sessions.values() if s.status == "waiting"]
+
+    def list_connected(self) -> List[Session]:
+        """获取当前已接入对话的会话列表。"""
+        return [s for s in self._sessions.values() if s.status == "connected"]
+
+    def waiting_count(self) -> int:
+        """当前排队人数。"""
+        return len(self.list_waiting())
+
+    def waiting_position(self, user_id: str) -> Optional[int]:
+        """获取用户在排队中的位置（从1开始）。"""
+        waiting_users = [s.user_id for s in self.list_waiting()]
+        if user_id in waiting_users:
+            return waiting_users.index(user_id) + 1
+        return None
+
+    def connect(self, user_id: str, servicer_id: str) -> Optional[Session]:
+        """将排队会话标记为已接入并重置开始时间。"""
+        session = self.get(user_id)
+        if not session:
+            return None
+        session.status = "connected"
+        session.servicer_id = servicer_id
+        session.start_time = time.time()
+        return session
+
+    def iter_timeout_sessions(self) -> Iterable[Session]:
+        """遍历超时会话（等待或对话超时）。"""
+        current_time = time.time()
+        for session in list(self._sessions.values()):
+            duration = current_time - session.start_time
+            if (session.status == "waiting" and duration >= self.waiting_timeout) or (
+                session.status == "connected" and duration >= self.conversation_timeout
+            ):
+                yield session
 
 
 @register(
@@ -32,83 +123,53 @@ class HumanServicePlugin(Star):
         self.conversation_timeout = config.get("conversation_timeout", 300)
 
         # 初始化会话管理器
-        self.session_map: Dict[str, Dict] = {}
-        # {user_id: {servicer_id, status, group_id, start_time, user_umo}}
+        self.sessions = SessionManager(
+            waiting_timeout=self.waiting_timeout,
+            conversation_timeout=self.conversation_timeout,
+        )
         # 如果未配置客服，使用管理员作为默认客服
         if not self.servicers_id:
             for admin_id in context.get_config()["admins_id"]:
                 if admin_id.isdigit():
                     self.servicers_id.append(admin_id)
 
-    def _get_waiting_count(self) -> int:
-        """获取当前等待队列长度"""
-        return sum(
-            1 for session in self.session_map.values() if session["status"] == "waiting"
-        )
-
-    def _get_user_position(self, user_id: str) -> int:
-        """获取用户在等待队列中的位置"""
-        waiting_users = [
-            uid
-            for uid, session in self.session_map.items()
-            if session["status"] == "waiting"
-        ]
-        if user_id in waiting_users:
-            return waiting_users.index(user_id) + 1  # 排名从1开始
-        return
-
     async def _check_session_timeout(self):
         """检查并清理超时会话"""
-        current_time = time.time()
-        timeout_sessions = []
-
-        for user_id, session in self.session_map.items():
-            # 计算会话持续时间(秒)
-            duration = current_time - session["start_time"]
-            # 根据状态使用不同的超时阈值
-            if (
-                session["status"] == "waiting" and duration >= self.waiting_timeout
-            ) or (
-                session["status"] == "connected"
-                and duration >= self.conversation_timeout
-            ):
-                timeout_sessions.append(user_id)
-
         # 处理超时会话
-        for user_id in timeout_sessions:
-            session = self.session_map[user_id]
+        for session in self.sessions.iter_timeout_sessions():
+            user_id = session.user_id
 
             # 通知双方会话超时
-            if session["status"] == "connected":
-                await self._send_timeout_notification(user_id, session)
-            elif session["status"] == "waiting":
+            if session.status == "connected":
+                await self._send_timeout_notification(session)
+            elif session.status == "waiting":
                 try:
                     message_chain = MessageChain().message(
                         f"【{user_id}】用户，很抱歉：\n您转人工排队超时，请重新请求"
                     )
-                    await self.context.send_message(session["user_umo"], message_chain)
+                    await self.context.send_message(session.user_umo, message_chain)
                 except Exception as e:
                     logger.error(f"通知用户 {user_id} 排队超时的消息发送失败: {str(e)}")
 
-            del self.session_map[user_id]
+            self.sessions.remove(user_id)
 
-    async def _send_timeout_notification(self, user_id: str, session: Dict):
+    async def _send_timeout_notification(self, session: Session):
         """发送会话超时通知"""
         try:
             # 通知用户
             user_chain = MessageChain().message("会话已超时结束")
-            await self.context.send_message(session["user_umo"], user_chain)
+            await self.context.send_message(session.user_umo, user_chain)
             # 通知客服
             servicer_chain = MessageChain().message(
-                f"您与用户 {user_id} 的会话已超时结束"
+                f"您与用户 {session.user_id} 的会话已超时结束"
             )
             await self.context.send_message(
-                f"private:{session['servicer_id']}", servicer_chain
+                f"private:{session.servicer_id}", servicer_chain
             )
         except Exception as e:
             logger.error(f"发送超时通知失败: {str(e)}")
 
-    @filter.command("转人工", priority=1)
+    @filter.command("转人工", alias={"请求人工服务", "转客服"}, priority=1)
     async def transfer_to_human(self, event: AiocqhttpMessageEvent):
         """请求接入人工服务，进入排队队列等待"""
         sender_id = event.get_sender_id()
@@ -118,26 +179,20 @@ class HumanServicePlugin(Star):
         # 存储用户的unified_msg_origin
         user_umo = event.unified_msg_origin
 
-        if sender_id in self.session_map:
-            status = self.session_map[sender_id]["status"]
+        if self.sessions.has_session(sender_id):
+            status = self.sessions.get(sender_id).status
             if status == "waiting":
-                position = self._get_user_position(sender_id)
+                position = self.sessions.waiting_position(sender_id)
                 yield event.plain_result(f"⚠ 您已在排队中，当前排名: {position}")
             else:
                 yield event.plain_result("⚠ 您已在对话中")
             return
 
         # 无论是否有客服，都加入等待队列，同时存储umo
-        self.session_map[sender_id] = {
-            "servicer_id": "",
-            "status": "waiting",
-            "group_id": group_id,
-            "start_time": time.time(),
-            "user_umo": user_umo,  # 新增存储用户的umo
-        }
+        self.sessions.add_waiting(sender_id, group_id, user_umo)
         # 获取当前排队位置
-        position = self._get_user_position(sender_id)
-        waiting_count = self._get_waiting_count()
+        position = self.sessions.waiting_position(sender_id)
+        waiting_count = self.sessions.waiting_count()
         waiting_timeout = round(self.waiting_timeout / 60, 2)
         yield event.plain_result(
             f"已加入人工服务排队队列👥\n当前排队人数: {waiting_count} 人\n您的排名: {position}\n请耐心等待超级管理员接入，超时{waiting_timeout}分钟未接入将自动取消请求\n(注意：恶意转人工将会被拉黑)"
@@ -157,50 +212,45 @@ class HumanServicePlugin(Star):
         """用户取消人工服务，退出排队或结束对话"""
         sender_id = event.get_sender_id()
         sender_name = event.get_sender_name()
-        session = self.session_map.get(sender_id)
+        session = self.sessions.get(sender_id)
 
         if not session:
             yield event.plain_result("您当前没有正在进行的人工会话或排队")
             return
 
         # 通知客服
-        if session["status"] == "connected" and session["servicer_id"]:
+        if session.status == "connected" and session.servicer_id:
             try:
                 await self.send(
                     event,
                     message=f"{sender_name} 已主动结束人工对话",
-                    user_id=session["servicer_id"],
+                    user_id=session.servicer_id,
                 )
             except Exception as e:
                 logger.error(f"通知客服会话取消失败: {str(e)}")
 
         # 从队列中移除
-        del self.session_map[sender_id]
+        self.sessions.remove(sender_id)
 
         # 通知其他排队用户位置变化
         await self._notify_position_change()
-        if session["status"] == "waiting":
+        if session.status == "waiting":
             yield event.plain_result("已取消人工服务排队请求")
         else:
             yield event.plain_result("好的，已结束人工对话，我现在是bot啦！")
 
     async def _notify_position_change(self):
         """通知排队用户位置变化"""
-        waiting_users = [
-            uid
-            for uid, session in self.session_map.items()
-            if session["status"] == "waiting"
-        ]
-        for idx, user_id in enumerate(waiting_users):
+        waiting_sessions = self.sessions.list_waiting()
+        for idx, session in enumerate(waiting_sessions):
             new_position = idx + 1
-            user_session = self.session_map[user_id]
             try:
                 message_chain = MessageChain().message(
                     f"排队位置更新: 您当前排名 {new_position}\n(前方还有 {new_position - 1} 人)"
                 )
-                await self.context.send_message(user_session["user_umo"], message_chain)
+                await self.context.send_message(session.user_umo, message_chain)
             except Exception as e:
-                logger.error(f"通知用户 {user_id} 位置变化失败: {str(e)}")
+                logger.error(f"通知用户 {session.user_id} 位置变化失败: {str(e)}")
 
     @filter.command("接入对话", priority=1)
     async def accept_conversation(
@@ -223,23 +273,31 @@ class HumanServicePlugin(Star):
                 if match := re.search(r"[(\[【](\d+)[)\]】]", text):
                     target_id = match.group(1)
 
+        if target_id is None:
+            yield event.plain_result("请指定要接入的用户ID或回复包含用户ID的消息")
+            return
+
         target_id = str(target_id)
-        session = self.session_map.get(target_id)
+        session = self.sessions.get(target_id)
 
         # 验证会话状态
-        if not session or session["status"] != "waiting":
+        if not session:
             yield event.plain_result(f"用户({target_id})未在排队或对话中")
             return
 
-        if session["status"] == "connected":
-            yield event.plain_result("您正在与该用户对话")
+        if session.status == "connected":
+            if session.servicer_id == sender_id:
+                yield event.plain_result("您正在与该用户对话")
+            else:
+                yield event.plain_result(f"用户({target_id})已被其他客服接入")
+            return
 
-        # 更新会话状态时保留用户umo
-        session["status"] = "connected"
-        session["servicer_id"] = sender_id
-        session["start_time"] = time.time()  # 重置计时
-        # 保留用户的umo信息
-        session["user_umo"] = session.get("user_umo", "")
+        if session.status != "waiting":
+            yield event.plain_result(f"用户({target_id})未在排队中")
+            return
+
+        # 更新会话状态并重置计时
+        self.sessions.connect(target_id, sender_id)
 
         # 通知用户
         try:
@@ -249,12 +307,12 @@ class HumanServicePlugin(Star):
                 message=(
                     f"超级管理员👤:{sender_name}\n已接入对话⚠️⚠️⚠️\n您最多有{conversation_timeout}分钟的时间进行对话\n(请用简洁的话描述所遇到的问题)"
                 ),
-                group_id=session["group_id"],
+                group_id=session.group_id,
                 user_id=target_id,
             )
         except Exception as e:
             logger.error(f"通知用户 {target_id} 客服接入失败: {str(e)}")
-            session["status"] = "waiting"  # 恢复状态
+            session.status = "waiting"  # 恢复状态
             yield event.plain_result("接入失败，请重试")
             return
 
@@ -274,16 +332,16 @@ class HumanServicePlugin(Star):
         if sender_id not in self.servicers_id:
             return
 
-        for uid, session in self.session_map.items():
-            if session["servicer_id"] == sender_id:
+        for session in self.sessions.list_connected():
+            if session.servicer_id == sender_id:
                 await self.send(
                     event,
                     message=(f"超级管理员👤：{sender_name}\n❗已结束与你的对话❗"),
-                    group_id=session["group_id"],
-                    user_id=uid,
+                    group_id=session.group_id,
+                    user_id=session.user_id,
                 )
-                del self.session_map[uid]
-                yield event.plain_result(f"已结束与用户({uid})的对话")
+                self.sessions.remove(session.user_id)
+                yield event.plain_result(f"已结束与用户({session.user_id})的对话")
                 return
 
         yield event.plain_result("当前无对话需要结束")
@@ -300,35 +358,29 @@ class HumanServicePlugin(Star):
             return
         # 先清理超时会话
         await self._check_session_timeout()
-        if not self.session_map:
+        if self.sessions.is_empty():
             yield event.plain_result("当前没有活跃会话和排队请求")
             return
 
         # 分离等待队列和活跃对话
-        waiting_sessions = [
-            (uid, session)
-            for uid, session in self.session_map.items()
-            if session["status"] == "waiting"
-        ]
-        active_sessions = [
-            (uid, session)
-            for uid, session in self.session_map.items()
-            if session["status"] == "connected"
-        ]
+        waiting_sessions = self.sessions.list_waiting()
+        active_sessions = self.sessions.list_connected()
 
         msg_lines = []
         if waiting_sessions:
             msg_lines.append("📋 排队队列：")
-            for idx, (uid, session) in enumerate(waiting_sessions):
-                duration = int(time.time() - session["start_time"]) // 60
-                msg_lines.append(f"{idx + 1}. 用户 {uid}\n（等待时间：{duration}分钟）")
+            for idx, session in enumerate(waiting_sessions):
+                duration = int(time.time() - session.start_time) // 60
+                msg_lines.append(
+                    f"{idx + 1}. 用户 {session.user_id}\n（等待时间：{duration}分钟）"
+                )
 
         if active_sessions:
             msg_lines.append("\n🔗 活跃对话：")
-            for uid, session in active_sessions:
-                duration = int(time.time() - session["start_time"]) // 60
+            for session in active_sessions:
+                duration = int(time.time() - session.start_time) // 60
                 msg_lines.append(
-                    f"- 用户 {uid}\n（客服：{session['servicer_id']}，时长：{duration}分钟）"
+                    f"- 用户 {session.user_id}\n（客服：{session.servicer_id}，时长：{duration}分钟）"
                 )
         yield event.plain_result("\n".join(msg_lines))
 
@@ -378,30 +430,31 @@ class HumanServicePlugin(Star):
             and event.message_str
             not in ("接入对话", "结束对话", "查看对话", "查看会话", "查看排队")
         ):
-            for user_id, session in self.session_map.items():
-                if (
-                    session["servicer_id"] == sender_id
-                    and session["status"] == "connected"
-                ):
+            # 仅转发当前客服已接入的会话
+            for session in self.sessions.list_connected():
+                if session.servicer_id == sender_id:
                     await self.send_ob(
                         event,
-                        group_id=session["group_id"],
-                        user_id=user_id,
+                        group_id=session.group_id,
+                        user_id=session.user_id,
                     )
                     event.stop_event()
                     break
 
         # 用户 → 管理员
-        elif session := self.session_map.get(sender_id):
-            if session["status"] == "connected" and session["servicer_id"]:
+        elif session := self.sessions.get(sender_id):
+            if session.status == "connected" and session.servicer_id:
                 await self.send_ob(
                     event,
-                    user_id=session["servicer_id"],
+                    user_id=session.servicer_id,
                 )
                 event.stop_event()
 
     async def terminate(self):
         """插件卸载时调用，清理会话"""
         logger.info("人工客服插件正在卸载，清理会话中...")
-        self.session_map.clear()
+        self.sessions = SessionManager(
+            waiting_timeout=self.waiting_timeout,
+            conversation_timeout=self.conversation_timeout,
+        )
         logger.info("人工客服插件卸载完成")
